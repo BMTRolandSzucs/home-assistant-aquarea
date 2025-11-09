@@ -12,6 +12,7 @@ from aioaquarea import (
     SpecialStatus,
     UpdateOperationMode,
     DeviceDirection,
+    PumpDuty,
 )
 from homeassistant.components.climate import (
     ATTR_HVAC_MODE,
@@ -57,6 +58,12 @@ async def async_setup_entry(
             for coordinator in data.values()
             for zone_id in coordinator.device.zones
         ]
+        +
+        [
+            WaterHeater(coordinator)
+            for coordinator in data.values()
+            if coordinator.device.has_tank
+        ]
     )
 
 
@@ -75,22 +82,11 @@ def get_hvac_mode_from_ext_op_mode(
     return HVACMode.OFF
 
 
-def get_hvac_action_from_ext_action(action: DeviceAction) -> HVACAction:
-    """Convert device action to HVAC action."""
-    if action == DeviceAction.HEATING:
-        return HVACAction.HEATING
-    if action == DeviceAction.COOLING:
-        return HVACAction.COOLING
-    if action == DeviceAction.IDLE:
-        return HVACAction.IDLE
-    return HVACAction.IDLE
-
-
 def get_hvac_action_from_device_direction(
-    direction: DeviceDirection, hvac_mode: HVACMode
+    direction: DeviceDirection, hvac_mode: HVACMode, pump_duty: PumpDuty
 ) -> HVACAction:
     """Convert device direction to HVAC action."""
-    if direction == DeviceDirection.PUMP:
+    if direction == DeviceDirection.PUMP and pump_duty == PumpDuty.ON:
         if hvac_mode == HVACMode.HEAT:
             return HVACAction.HEATING
         if hvac_mode == HVACMode.COOL:
@@ -142,7 +138,7 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
             device.mode, zone.operation_status
         )
         self._attr_hvac_action = get_hvac_action_from_device_direction(
-            device.current_direction, self._attr_hvac_mode
+            device.current_direction, self._attr_hvac_mode, device.pump_duty
         )
         self._attr_icon = (
             "mdi:hvac-off" if device.mode == ExtendedOperationMode.OFF else "mdi:hvac"
@@ -283,3 +279,89 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
 
         # Schedule a single delayed refresh (non-blocking)
         self.hass.async_create_task(self._schedule_refresh(10.0))
+
+class WaterHeater(AquareaBaseEntity, ClimateEntity):
+    """Representation of a Aquarea sensor."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: AquareaDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+
+        self._attr_name = "Tank"
+        self._attr_unique_id = f"{super().unique_id}_tank"
+        self._attr_temperature_unit = UnitOfTemperature.CELSIUS
+        self._attr_hvac_modes = [HVACMode.HEAT, HVACMode.OFF]
+        self._attr_precision = PRECISION_WHOLE
+        self._attr_target_temperature_step = 1
+        self._attr_supported_features = (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
+        )
+        self._update_temperature()
+        self._update_operation_state()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+
+        self._update_temperature()
+        self._update_operation_state()
+        super()._handle_coordinator_update()
+
+    def _update_operation_state(self) -> None:
+        if self.coordinator.device.tank.operation_status == OperationStatus.OFF:
+            self._attr_hvac_mode = HVACMode.OFF
+            self._attr_icon = (
+                "mdi:water-boiler-alert"
+                if self.coordinator.device.is_on_error
+                else "mdi:water-boiler-off"
+            )
+            return
+
+        # Device reports tank is on; treat the water heater as a heat pump device.
+        self._attr_icon = "mdi:water-boiler"
+        self._attr_hvac_mode = HVACMode.HEAT
+
+        # Determine if the device is actively heating the tank. Different device actions
+        # from the library may be used depending on model/version; check several forms.
+        device = self.coordinator.device
+        if device.current_direction == DeviceDirection.WATER and device.pump_duty == PumpDuty.ON:
+            self._attr_hvac_action = HVACAction.HEATING
+        else:
+            self._attr_hvac_action = HVACAction.IDLE
+
+    def _update_temperature(self) -> None:
+        self._attr_min_temp = self.coordinator.device.tank.heat_min
+        self._attr_max_temp = self.coordinator.device.tank.heat_max
+        self._attr_target_temperature = self.coordinator.device.tank.target_temperature
+        self._attr_current_temperature = self.coordinator.device.tank.temperature
+
+    async def async_set_temperature(self, **kwargs):
+        """Set new target temperature."""
+        temperature: float | None = kwargs.get(ATTR_TEMPERATURE)
+        if temperature is not None:
+            _LOGGER.debug(
+                "Setting %s water tank temperature to %s",
+                self.coordinator.device.device_id,
+                str(temperature),
+            )
+            await self.coordinator.device.tank.set_target_temperature(int(temperature))
+
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        _LOGGER.debug(
+            "Turning %s water tank %s",
+            self.coordinator.device.device_id,
+            hvac_mode,
+        )
+        if hvac_mode == HVACMode.HEAT:
+            await self.coordinator.device.tank.turn_on()
+        elif hvac_mode == HVACMode.OFF:
+            await self.coordinator.device.tank.turn_off()
+
+    async def async_turn_on(self):
+        """Turn the water heater on."""
+        await self.coordinator.device.tank.turn_on()
+        
+    async def async_turn_off(self):
+        """Turn the water heater off."""
+        await self.coordinator.device.tank.turn_off()
