@@ -89,16 +89,11 @@ class AquareaDataUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Fetching data from Aquarea Smart Cloud Service")
         try:
             # Initialize or refresh device state
-            if not self._device:
-                _LOGGER.debug("Initializing device for the first time")
-                self._device = await self._client.get_device(
-                    device_info=self._device_info,
-                    consumption_refresh_interval=CONSUMPTION_REFRESH_INTERVAL,
-                    timezone=dt_util.get_time_zone(self.hass.config.time_zone),
-                )
-            else:
-                _LOGGER.debug("Refreshing device data")
-                await self.device.refresh_data()
+            self._device = await self._client.get_device(
+                device_info=self._device_info,
+                consumption_refresh_interval=CONSUMPTION_REFRESH_INTERVAL,
+                timezone=dt_util.get_time_zone(self.hass.config.time_zone),
+            )
 
             # Centralized hourly consumption fetch (once per YYYYMMDDHH)
             try:
