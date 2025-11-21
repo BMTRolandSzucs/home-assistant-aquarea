@@ -91,7 +91,10 @@ def get_hvac_action_from_device_direction(
             return HVACAction.HEATING
         if hvac_mode == HVACMode.COOL:
             return HVACAction.COOLING
-    return HVACAction.IDLE
+    if hvac_mode == HVACMode.OFF:
+        return HVACAction.OFF
+    else:
+        return HVACAction.IDLE
 
 
 def get_update_operation_mode_from_hvac_mode(mode: HVACMode) -> UpdateOperationMode:
@@ -311,6 +314,7 @@ class WaterHeater(AquareaBaseEntity, ClimateEntity):
     def _update_operation_state(self) -> None:
         if self.coordinator.device.tank.operation_status == OperationStatus.OFF:
             self._attr_hvac_mode = HVACMode.OFF
+            self._attr_hvac_action = HVACAction.OFF
             self._attr_icon = (
                 "mdi:water-boiler-alert"
                 if self.coordinator.device.is_on_error
