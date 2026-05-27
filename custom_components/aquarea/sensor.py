@@ -136,6 +136,14 @@ def _is_heating_water(device: aioaquarea.Device) -> bool:
     return name == "WATER" if name is not None else str(direction) == "WATER"
 
 
+def _is_zone_active(device: aioaquarea.Device) -> bool:
+    direction = getattr(device, "current_direction", None)
+    if direction is None:
+        return False
+    name = getattr(direction, "name", None)
+    return name == "PUMP" if name is not None else str(direction) == "PUMP"
+
+
 def _is_defrosting(device: aioaquarea.Device) -> bool:
     return device.device_mode_status is aioaquarea.DeviceModeStatus.DEFROST
 
@@ -155,6 +163,13 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
             translation_key="dhw_cycles_today",
             icon="mdi:water-boiler",
             detector=_is_heating_water,
+        ))
+        entities.append(DailyEdgeCounterSensor(
+            coordinator,
+            unique_suffix="zone_cycles_today",
+            translation_key="zone_cycles_today",
+            icon="mdi:radiator",
+            detector=_is_zone_active,
         ))
         entities.append(DailyEdgeCounterSensor(
             coordinator,

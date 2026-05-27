@@ -92,6 +92,9 @@
         "dhw_cycles_today": {
           "name": "DHW heating cycles today"
         },
+        "zone_cycles_today": {
+          "name": "Zone cycles today"
+        },
         "defrost_cycles_today": {
           "name": "Defrost cycles today"
         }
