@@ -5,6 +5,7 @@ import asyncio
 import logging
 from typing import Any
 
+import aioaquarea
 from aioaquarea import (
     DeviceAction,
     ExtendedOperationMode,
@@ -42,6 +43,9 @@ SPECIAL_STATUS_LOOKUP: dict[str, SpecialStatus | None] = {
 }
 SPECIAL_STATUS_REVERSE_LOOKUP = {v: k for k, v in SPECIAL_STATUS_LOOKUP.items()}
 
+
+CLIMATE_DELAY_SHORT = 5.0
+CLIMATE_DELAY_LONG = 10.0
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -117,7 +121,8 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
         super().__init__(coordinator)
         self._zone_id = zone_id
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
-        self._attr_name = self.coordinator.device.zones.get(zone_id).name
+        zone = self.coordinator.device.zones.get(zone_id)
+        self._attr_name = zone.name
         self._attr_unique_id = f"{super().unique_id}_climate_{zone_id}"
         self._attr_supported_features = (
             ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
@@ -154,8 +159,6 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
         # If the device doesn't allow to set the temperature directly
         # We set the max and min to the current temperature.
         # This is a workaround to make the UI work.
-        self._attr_max_temp = zone.temperature
-        self._attr_min_temp = zone.temperature
         if zone.supports_set_temperature and device.mode != ExtendedOperationMode.OFF:
             self._attr_max_temp = (
                 zone.cool_max if device.mode in (ExtendedOperationMode.COOL, ExtendedOperationMode.AUTO_COOL) else zone.heat_max
@@ -163,21 +166,16 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
             self._attr_min_temp = (
                 zone.cool_min if device.mode in (ExtendedOperationMode.COOL, ExtendedOperationMode.AUTO_COOL) else zone.heat_min
             )
+        else:
+            self._attr_max_temp = zone.temperature
+            self._attr_min_temp = zone.temperature
+
         self._attr_target_temperature = (
             zone.cool_target_temperature if device.mode in (
                 ExtendedOperationMode.COOL, ExtendedOperationMode.AUTO_COOL,
             ) else zone.heat_target_temperature
         )
         self._attr_target_temperature_step = 1
-        _LOGGER.debug(
-            "Zone %s: Temp: %s, Cool Max: %s, Heat Max: %s, Cool Target: %s, Heat Target: %s",
-            self._zone_id,
-            zone.temperature,
-            zone.cool_max,
-            zone.heat_max,
-            zone.cool_target_temperature,
-            zone.heat_target_temperature,
-        )
         super()._handle_coordinator_update()
 
     async def _schedule_refresh(self, delay: float = 5.0) -> None:
@@ -190,7 +188,7 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
         await asyncio.sleep(delay)
         try:
             await self.coordinator.async_request_refresh(force_fetch=True)
-        except Exception:
+        except aioaquarea.errors.RequestFailedError:
             _LOGGER.exception(
                 "Delayed refresh failed for device %s",
                 getattr(self.coordinator.device, "device_id", "unknown"),
@@ -202,19 +200,30 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
         Instead of polling repeatedly, schedule a single delayed refresh so the
         coordinator fetches the updated state a short time after the change.
         """
-        if hvac_mode not in self.hvac_modes:  # Use self.hvac_modes instead of self._attr_hvac_modes
+        if hvac_mode not in self.hvac_modes:
             raise ValueError(f"Unsupported HVAC mode: {hvac_mode}")
         _LOGGER.debug(
             "Setting operation mode of %s to %s",
             self.coordinator.device.device_id,
             hvac_mode,
         )
-        await self.coordinator.device.set_mode(
-            get_update_operation_mode_from_hvac_mode(hvac_mode), self._zone_id
-        )
+        # Optimistic update
+        old_hvac_mode = self._attr_hvac_mode
+        self._attr_hvac_mode = hvac_mode
+        self.async_write_ha_state()
+
+        try:
+            await self.coordinator.device.set_mode(
+                get_update_operation_mode_from_hvac_mode(hvac_mode), self._zone_id
+            )
+        except Exception:
+            _LOGGER.error("Failed to set HVAC mode to %s, rolling back", hvac_mode)
+            self._attr_hvac_mode = old_hvac_mode
+            self.async_write_ha_state()
+            raise
 
         # Schedule a single delayed refresh (non-blocking)
-        self.hass.async_create_task(self._schedule_refresh(10.0))
+        self.hass.async_create_task(self._schedule_refresh(CLIMATE_DELAY_LONG))
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature if supported by the zone.
@@ -234,12 +243,24 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
                 str(temperature),
             )
             _LOGGER.debug(f"Attempting to set temperature for zone {zone.zone_id} to {temperature}")
-            await self.coordinator.device.set_temperature(
-                int(temperature), zone.zone_id
-            )
+
+            # Optimistic update
+            old_temp = self._attr_target_temperature
+            self._attr_target_temperature = temperature
+            self.async_write_ha_state()
+
+            try:
+                await self.coordinator.device.set_temperature(
+                    int(temperature), zone.zone_id
+                )
+            except Exception:
+                _LOGGER.error("Failed to set temperature to %s, rolling back", temperature)
+                self._attr_target_temperature = old_temp
+                self.async_write_ha_state()
+                raise
 
             # Schedule a single delayed refresh (non-blocking)
-            self.hass.async_create_task(self._schedule_refresh(5.0))
+            self.hass.async_create_task(self._schedule_refresh(CLIMATE_DELAY_SHORT))
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new target preset mode.
@@ -254,12 +275,23 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
             self.coordinator.device.device_id,
             preset_mode,
         )
-        await self.coordinator.device.set_special_status(
-            SPECIAL_STATUS_LOOKUP[preset_mode]
-        )
+        # Optimistic update
+        old_preset = self._attr_preset_mode
+        self._attr_preset_mode = preset_mode
+        self.async_write_ha_state()
+
+        try:
+            await self.coordinator.device.set_special_status(
+                SPECIAL_STATUS_LOOKUP[preset_mode]
+            )
+        except Exception:
+            _LOGGER.error("Failed to set preset mode to %s, rolling back", preset_mode)
+            self._attr_preset_mode = old_preset
+            self.async_write_ha_state()
+            raise
 
         # Schedule a single delayed refresh (non-blocking)
-        self.hass.async_create_task(self._schedule_refresh(10.0))
+        self.hass.async_create_task(self._schedule_refresh(CLIMATE_DELAY_LONG))
 
     async def async_turn_on(self) -> None:
         """Turn the entity on and schedule a delayed refresh."""
@@ -267,10 +299,21 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
             "Turning on device %s",
             self.coordinator.device.device_id,
         )
-        await self.coordinator.device.turn_on()
+        # Optimistic update (assuming HEAT as default or last mode)
+        old_hvac_mode = self._attr_hvac_mode
+        self._attr_hvac_mode = HVACMode.HEAT
+        self.async_write_ha_state()
+
+        try:
+            await self.coordinator.device.turn_on()
+        except Exception:
+            _LOGGER.error("Failed to turn on device, rolling back")
+            self._attr_hvac_mode = old_hvac_mode
+            self.async_write_ha_state()
+            raise
 
         # Schedule a single delayed refresh (non-blocking)
-        self.hass.async_create_task(self._schedule_refresh(10.0))
+        self.hass.async_create_task(self._schedule_refresh(CLIMATE_DELAY_LONG))
 
     async def async_turn_off(self) -> None:
         """Turn the entity off and schedule a delayed refresh."""
@@ -278,10 +321,21 @@ class HeatPumpClimate(AquareaBaseEntity, ClimateEntity):
             "Turning off device %s",
             self.coordinator.device.device_id,
         )
-        await self.coordinator.device.turn_off()
+        # Optimistic update
+        old_hvac_mode = self._attr_hvac_mode
+        self._attr_hvac_mode = HVACMode.OFF
+        self.async_write_ha_state()
+
+        try:
+            await self.coordinator.device.turn_off()
+        except Exception:
+            _LOGGER.error("Failed to turn off device, rolling back")
+            self._attr_hvac_mode = old_hvac_mode
+            self.async_write_ha_state()
+            raise
 
         # Schedule a single delayed refresh (non-blocking)
-        self.hass.async_create_task(self._schedule_refresh(10.0))
+        self.hass.async_create_task(self._schedule_refresh(CLIMATE_DELAY_LONG))
 
 class WaterHeater(AquareaBaseEntity, ClimateEntity):
     """Representation of a Aquarea sensor."""
@@ -365,7 +419,7 @@ class WaterHeater(AquareaBaseEntity, ClimateEntity):
     async def async_turn_on(self):
         """Turn the water heater on."""
         await self.coordinator.device.tank.turn_on()
-        
+
     async def async_turn_off(self):
         """Turn the water heater off."""
         await self.coordinator.device.tank.turn_off()

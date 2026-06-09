@@ -56,8 +56,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass=hass, entry=entry, client=client, device_info=device
             )
             hass.data[DOMAIN][entry.entry_id][DEVICES][device.device_id] = coordinator
+            _LOGGER.debug("Performing first refresh for device %s", device.device_id)
             await coordinator.async_config_entry_first_refresh()
 
+        _LOGGER.debug("Forwarding entry setups for platforms")
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except aioaquarea.AuthenticationError as err:
         if err.error_code in (
@@ -88,14 +90,11 @@ class AquareaBaseEntity(CoordinatorEntity[AquareaDataUpdateCoordinator]):
         """Initialize entity."""
         super().__init__(coordinator)
 
-        self._attrs: dict[str, Any] = {
-            "name": self.coordinator.device_info.name,
-            "id": self.coordinator.device_info.device_id,
-        }
+
         self._attr_unique_id = self.coordinator.device_info.device_id
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self.coordinator.device_info.device_id)},
-            manufacturer=self.coordinator.device.manufacturer,
+            manufacturer="Panasonic",
             model=self.coordinator.device_info.model,
             name=self.coordinator.device_info.name,
             sw_version=self.coordinator.device_info.firmware_version,
@@ -104,7 +103,6 @@ class AquareaBaseEntity(CoordinatorEntity[AquareaDataUpdateCoordinator]):
     async def async_added_to_hass(self) -> None:
         """When entity is added to hass."""
         await super().async_added_to_hass()
-        self.async_write_ha_state()
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -114,7 +112,4 @@ class AquareaBaseEntity(CoordinatorEntity[AquareaDataUpdateCoordinator]):
     @callback
     def async_write_ha_state(self) -> None:
         """Write the state to Home Assistant."""
-        _LOGGER.debug(
-            "async_write_ha_state called for entity %s", self.entity_id
-        )
         super().async_write_ha_state()
