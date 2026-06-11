@@ -33,6 +33,24 @@ def _create_client(hass: HomeAssistant, entry: ConfigEntry) -> aioaquarea.Client
     username = entry.data.get(CONF_USERNAME)
     password = entry.data.get(CONF_PASSWORD)
     session = async_create_clientsession(hass)
+    original_request = session.request
+
+    async def patched_request(method, url, **kwargs):
+        json_payload = kwargs.get("json") or {}
+        api_name = json_payload.get("apiName", "")
+
+        if (
+                "remote/v1/app/common/transfer" in url
+                and "deviceDirect=0" in api_name
+                and "/remote/v1/api/devices" in api_name
+        ):
+            raise aioaquarea.errors.RequestFailedError(
+                "Cached Aquarea device status intentionally disabled."
+            )
+
+        return await original_request(method, url, **kwargs)
+
+    session.request = patched_request
     return aioaquarea.Client(session, username, password)
 
 
@@ -63,8 +81,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except aioaquarea.AuthenticationError as err:
         if err.error_code in (
-            aioaquarea.AuthenticationErrorCodes.INVALID_USERNAME_OR_PASSWORD,
-            aioaquarea.AuthenticationErrorCodes.INVALID_CREDENTIALS,
+                aioaquarea.AuthenticationErrorCodes.INVALID_USERNAME_OR_PASSWORD,
+                aioaquarea.AuthenticationErrorCodes.INVALID_CREDENTIALS,
         ):
             raise ConfigEntryAuthFailed from err
 
@@ -89,7 +107,6 @@ class AquareaBaseEntity(CoordinatorEntity[AquareaDataUpdateCoordinator]):
     def __init__(self, coordinator: AquareaDataUpdateCoordinator) -> None:
         """Initialize entity."""
         super().__init__(coordinator)
-
 
         self._attr_unique_id = self.coordinator.device_info.device_id
         self._attr_device_info = DeviceInfo(
